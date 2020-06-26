@@ -2,7 +2,7 @@
 FROM rust:1.44.1-slim-buster
 
 RUN apt update && apt autoremove -y && apt upgrade -y
-RUN apt install -y procps iproute2 iputils-ping net-tools binutils debootstrap
+RUN apt install -y procps iproute2 iputils-ping net-tools binutils debootstrap curl
 
 WORKDIR /app/toy-container
 # RUN mkdir -p /app/toy-container

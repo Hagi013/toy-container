@@ -17,6 +17,11 @@ path = "src/container_1.rs"
 name = "container-pivot"
 path = "src/container_pivot.rs"
 
+[[bin]]
+name = "executor-1"
+path = "src/executor_1.rs"
+
 [dependencies]
 anyhow = "1.0.31"
 nix = "0.17.0"
+lazy_static = "1.4.0"
