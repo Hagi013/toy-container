@@ -21,6 +21,10 @@ path = "src/container_pivot.rs"
 name = "executor-1"
 path = "src/executor_1.rs"
 
+[[bin]]
+name = "trace-1"
+path = "src/execution_trace_1.rs"
+
 [dependencies]
 anyhow = "1.0.31"
 nix = "0.17.0"
