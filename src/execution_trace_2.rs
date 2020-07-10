@@ -1,7 +1,7 @@
 use anyhow::Result;
-use std::io::{Write, Stderr, BufReader, BufRead};
+use std::io::{Write, Stderr, BufReader, BufRead, Read};
 use std::process::{Command, Stdio};
-use std::fs::{self, copy, read_dir, FileType, set_permissions, remove_dir};
+use std::fs::{self, copy, read_dir, FileType, set_permissions, remove_dir, OpenOptions};
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::thread::sleep;
 use nix::sched::{self, CloneFlags};
@@ -12,9 +12,9 @@ use nix::sys::wait::WaitStatus;
 use nix::sys::signal;
 use nix::libc::{self, user_regs_struct};
 use std::time::Duration;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ffi::OsStr;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Arc};
 
 mod ptrace;
 
@@ -51,8 +51,13 @@ fn main() -> Result<()> {
         }
         println!("mount_dir: {:?}", *MOUNT_DIR.read().unwrap());
     }
+    let file_path = make_fifo("fifo.pipe", Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IRWXO)?;
+    let command_start_check_pipe: Arc<RwLock<PathBuf>> = Arc::new(RwLock::new(file_path));
+    // let command_start_flag: Arc<RwLock<bool>> = Arc::new(RwLock::new(false));
 
     let cb = Box::new(|| {
+        // let command_start_flag = Arc::clone(&command_start_flag);
+        let command_start_check_pipe = Arc::clone(&command_start_check_pipe);
         let self_pid = getpid();
         sethostname("container").unwrap();
         mount::<str, str, str, str>(
@@ -109,6 +114,25 @@ fn main() -> Result<()> {
 
         if (*MOUNT_DIR.read().unwrap()).is_some() {
             chdir("/target").unwrap();
+            spawn_sh("ls -a /tmp", self_pid);
+            {
+                // let mut write_guard: RwLockWriteGuard<bool> = COMMAND_START_FLAG.write().unwrap();
+                // *write_guard = true;
+                // let mut write_guard: RwLockWriteGuard<bool> = command_start_flag.write().unwrap();
+                // *write_guard = true;
+                sleep(Duration::from_secs(3));
+                // let mut write_guard: RwLockWriteGuard<PathBuf> = command_start_check_pipe.write().unwrap();
+                let read_guard = command_start_check_pipe.read().unwrap();
+                println!("00000000000000000: {:?}", (*read_guard).as_path());
+                let mut pipe = OpenOptions::new()
+                    .write(true)
+                    .open((*read_guard).as_path()).unwrap();
+                println!("1111111111111111111: {:?}", pipe);
+                pipe.write_all(b"Prepare done!").unwrap();
+                println!("2222222222222222");
+            }
+            // println!("Init *command_start_flag.read().unwrap(): {:?}, {:p}", *command_start_flag.read().unwrap(), &*command_start_flag.read().unwrap());
+            println!("Init *command_start_check_pipe");
             spawn_sh("ls -a", self_pid);
             spawn_sh(&*COMMAND.read().unwrap(), self_pid);
         }
@@ -136,25 +160,29 @@ fn main() -> Result<()> {
     update_mapping(Mapping::GID, pid, "0 0 1\n");
     let mut is_enter_stop: bool = false;
     let mut prev_orig_rax = 0;
-    let mut emu_flag: bool = false;
+    let mut emulate_flag = false;
+    // let command_start_flag = Arc::clone(&command_start_flag);
+    let command_start_check_pipe = Arc::clone(&command_start_check_pipe);
+    let mut prepare_flag = false;
     loop {
         let status: WaitStatus = ptrace::wait_pid(pid).unwrap();
-        println!("status: {:?}", status);
-        let regs: user_regs_struct = ptrace::getregs(pid).unwrap();
-        println!("emulate: {:?}, prev_orig_rax: {:?}, orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", emu_flag, prev_orig_rax, regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
+        // println!("status: {:?}", status);
+        let mut regs: user_regs_struct = ptrace::getregs(pid).unwrap();
+        // println!("prev_orig_rax: {:?}, orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", prev_orig_rax, regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
         match status {
             WaitStatus::Stopped(pid, sig) => {
                 match sig {
                     signal::SIGTRAP => {
-                        is_enter_stop = if regs.orig_rax != prev_orig_rax {
-                            true
-                        } else if emu_flag && regs.orig_rax == prev_orig_rax {
-                            true
-                        } else {
-                            false
-                        };
-                        if regs.orig_rax == libc::SYS_write as u64 && (regs.rdi == 1 || regs.rdi == 2 ) {
-                            println!("regs.orig_rax == libc::SYS_write, emulate: {:?}, prev_orig_rax: {:?}, orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", emu_flag, prev_orig_rax, regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
+                        // if regs.orig_rax == libc::SYS_write as u64 && (regs.rdi == 1 || regs.rdi == 2 ) {
+                        if regs.orig_rax == libc::SYS_write as u64 && regs.rdi == 1 {
+                            is_enter_stop = if regs.orig_rax != prev_orig_rax {
+                                true
+                            } else if regs.rax as i64 == -38 {
+                                true
+                            } else {
+                                false
+                            };
+
                             let mut bytes_list = vec![];
                             if is_enter_stop {
                                 for i in 0..(regs.rdx / (std::mem::size_of::<u64>() as u64)) {
@@ -164,39 +192,75 @@ fn main() -> Result<()> {
                                     }
                                     print!("{:?}", std::str::from_utf8(&bytes_list).unwrap());
                                     bytes_list = vec![];
-                                    emu_flag = true;
                                 }
-                            } else {
-                                emu_flag = false;
+                                // {
+                                    // println!("*COMMAND_START_FLAG.read().unwrap(): {:?}", *COMMAND_START_FLAG.read().unwrap());
+                                    // println!("*command_start_flag.read().unwrap(): {:?}, {:p}", *command_start_flag.read().unwrap(), &*command_start_flag.read().unwrap());
+                                    // if *command_start_flag.read().unwrap() == true {
+                                    //     regs.rax = regs.rdx;
+                                    //     ptrace::setregs(pid, regs);
+                                    //     emulate_flag = true;
+                                    // }
+                                // }
+                                {
+                                    if !prepare_flag {
+                                        let read__guard = command_start_check_pipe.read().unwrap();
+                                        println!("bbbbbbbbbbb: {:?}", *read__guard);
+                                        let mut pipe = OpenOptions::new()
+                                            .read(true)
+                                            .open((*read__guard).as_path());
+                                        println!("pipe: {:?}", pipe);
+                                        let mut contents = String::new();
+                                        println!("ccccccccccccc");
+                                        if pipe.is_ok() {
+                                            println!("ddddddddd");
+                                            pipe.unwrap().read_to_string(&mut contents);
+                                        }
+                                        // spawn_sh("cat /tmp/fifo.pipe", root_pid);
+                                        println!("command_start_check_pipe: {:?}", contents);
+                                        if contents == "Prepare done!".to_owned() {
+                                            prepare_flag = true
+                                            // regs.rax = regs.rdx;
+                                            // ptrace::setregs(pid, regs);
+                                            // emulate_flag = true;
+                                        }
+                                    } else {
+                                        regs.rax = regs.rdx;
+                                        ptrace::setregs(pid, regs);
+                                        emulate_flag = true;
+                                    }
+                                }
                             }
-                            println!("");
-                        } else {
-                            emu_flag = false;
                         }
                     },
+                    signal::SIGSEGV => {
+                        ptrace::detach(pid);
+                        println!("Pid: {:?} is Segv.", pid);
+                        println!("emulate_flag: {:?}, prev_orig_rax: {:?}, orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", emulate_flag, prev_orig_rax, regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
+                        if regs.orig_rax as i64 != -1 {
+                            break;
+                        }
+                    }
                     _ => {
                         println!("nothing.(not trap)");
-                        emu_flag = false;
                     }
                 }
             },
             _ => {
                 println!("nothing.(not stopped)");
-                emu_flag = false;
             },
         }
         is_enter_stop = false;
         prev_orig_rax = regs.orig_rax;
-        if emu_flag {
-            println!("emulate.{:?}", emu_flag);
+        // println!("");
+        if emulate_flag {
+            println!("Emulate!!!!!!!^^");
             ptrace::sysemu(pid);
-            // ptrace::sysemu_single(pid);
             // ptrace::syscall(pid);
         } else {
             ptrace::syscall(pid);
         }
-        // emu_flag = false;
-        // sleep(Duration::from_secs(3));
+        emulate_flag = false;
     }
     Ok(())
 }
@@ -315,4 +379,10 @@ fn mount_dir(source: &str, target: &str) -> Result<()> {
         None,
     );
     Ok(())
+}
+
+fn make_fifo(file_path: &str, mode: Mode) -> Result<PathBuf> {
+    let fifo_path = Path::new("/tmp").join(file_path);
+    nix::unistd::mkfifo(&fifo_path, mode)?;
+    Ok(fifo_path)
 }
