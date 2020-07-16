@@ -1,5 +1,5 @@
 use anyhow::Result;
-use nix::sys::ptrace;
+use nix::sys::{ptrace, signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use nix::libc::{self, user_regs_struct};
@@ -15,8 +15,32 @@ pub fn detach(pid: Pid) -> Result<()> {
     Ok(())
 }
 
-pub fn set_tracesysgood(pid: Pid) {
-    ptrace::setoptions(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD);
+pub fn set_tracesysgood(pid: Pid) -> Result<()>  {
+    let status = wait_pid(pid)?;
+    match status {
+        WaitStatus::Stopped(pid, signal::SIGSTOP) => {
+            ptrace::setoptions(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD).unwrap();
+        },
+        _ => {
+            panic!("Not Stopped Process...{:?}", pid);
+        }
+    }
+    syscall(pid);
+    Ok(())
+}
+
+pub fn set_emulate_option(pid: Pid) -> Result<()> {
+    let status = wait_pid(pid)?;
+    match status {
+        WaitStatus::Stopped(pid, signal::SIGSTOP) => {
+            ptrace::setoptions(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD | ptrace::Options::PTRACE_O_TRACEFORK | ptrace::Options::PTRACE_O_TRACEEXEC | ptrace::Options::PTRACE_O_TRACECLONE).unwrap();
+        },
+        _ => {
+            panic!("Not Stopped Process...{:?}", pid);
+        }
+    }
+    syscall(pid);
+    Ok(())
 }
 
 pub fn wait_pid(pid: Pid) -> Result<WaitStatus> {
@@ -24,8 +48,18 @@ pub fn wait_pid(pid: Pid) -> Result<WaitStatus> {
     Ok(status)
 }
 
+pub fn wait_all() -> Result<WaitStatus> {
+    // let status = waitpid(Pid::from_raw(-1), Some)?;
+    let status = waitpid(Pid::from_raw(-1), Some(WaitPidFlag::__WALL))?;
+    Ok(status)
+}
+
 pub fn syscall(pid: Pid) {
     ptrace::syscall(pid, None);
+}
+
+pub fn syscall_step(pid: Pid) {
+    ptrace::step(pid, None);
 }
 
 pub fn getregs(pid: Pid) -> Result<user_regs_struct> {
@@ -57,4 +91,22 @@ pub fn sysemu_single(pid: Pid) -> Result<()> {
         .map(drop);
     Ok(())
 
+}
+
+pub fn pokeuser(pid: Pid, addr: u64, data: u64) -> Result<()> {
+    Errno::result(
+        unsafe { libc::ptrace(6 as libc::c_uint, libc::pid_t::from(pid), addr as *mut libc::c_void, data as *mut libc::c_void) }
+    )
+        .map(drop);
+    Ok(())
+}
+
+pub fn get_event(pid: Pid) -> Result<i64> {
+    let u_long: i64 = ptrace::getevent(pid)?;
+    Ok(u_long)
+}
+
+pub fn get_siginfo(pid: Pid) -> Result<libc::siginfo_t> {
+    let siginfo = ptrace::getsiginfo(pid)?;
+    Ok(siginfo)
 }

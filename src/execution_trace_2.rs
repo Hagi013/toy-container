@@ -1,8 +1,9 @@
 use anyhow::Result;
-use std::io::{Write, Stderr, BufReader, BufRead, Read};
+use std::io::{Write, Stderr, BufReader, BufRead, Read, BufWriter};
 use std::process::{Command, Stdio};
-use std::fs::{self, copy, read_dir, FileType, set_permissions, remove_dir, OpenOptions};
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::fs::{self, copy, read_dir, FileType, set_permissions, remove_dir, OpenOptions, File};
+use std::os::unix::fs::{symlink, PermissionsExt, OpenOptionsExt};
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::thread::sleep;
 use nix::sched::{self, CloneFlags};
 use nix::unistd::{Pid, getpid, sethostname, chroot, chdir, mkdir, pivot_root};
@@ -15,6 +16,7 @@ use std::time::Duration;
 use std::path::{Path, PathBuf};
 use std::ffi::OsStr;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Arc};
+use std::collections::HashMap;
 
 mod ptrace;
 
@@ -51,9 +53,8 @@ fn main() -> Result<()> {
         }
         println!("mount_dir: {:?}", *MOUNT_DIR.read().unwrap());
     }
-    let file_path = make_fifo("fifo.pipe", Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IRWXO)?;
-    let command_start_check_pipe: Arc<RwLock<PathBuf>> = Arc::new(RwLock::new(file_path));
-    // let command_start_flag: Arc<RwLock<bool>> = Arc::new(RwLock::new(false));
+    let prepare_file = make_file("prepare.txt")?;
+    let command_start_check_pipe: Arc<RwLock<PathBuf>> = Arc::new(RwLock::new(prepare_file));
 
     let cb = Box::new(|| {
         // let command_start_flag = Arc::clone(&command_start_flag);
@@ -112,26 +113,17 @@ fn main() -> Result<()> {
         remove_dir("/oldrootfs").unwrap();
         chdir("/").unwrap();
 
+        // sleep(Duration::from_secs(1));
         if (*MOUNT_DIR.read().unwrap()).is_some() {
             chdir("/target").unwrap();
             spawn_sh("ls -a /tmp", self_pid);
             {
-                // let mut write_guard: RwLockWriteGuard<bool> = COMMAND_START_FLAG.write().unwrap();
-                // *write_guard = true;
-                // let mut write_guard: RwLockWriteGuard<bool> = command_start_flag.write().unwrap();
-                // *write_guard = true;
-                sleep(Duration::from_secs(3));
-                // let mut write_guard: RwLockWriteGuard<PathBuf> = command_start_check_pipe.write().unwrap();
                 let read_guard = command_start_check_pipe.read().unwrap();
-                println!("00000000000000000: {:?}", (*read_guard).as_path());
-                let mut pipe = OpenOptions::new()
+                let mut file = OpenOptions::new()
                     .write(true)
                     .open((*read_guard).as_path()).unwrap();
-                println!("1111111111111111111: {:?}", pipe);
-                pipe.write_all(b"Prepare done!").unwrap();
-                println!("2222222222222222");
+                file.write_all(b"Prepare done!").unwrap();
             }
-            // println!("Init *command_start_flag.read().unwrap(): {:?}, {:p}", *command_start_flag.read().unwrap(), &*command_start_flag.read().unwrap());
             println!("Init *command_start_check_pipe");
             spawn_sh("ls -a", self_pid);
             spawn_sh(&*COMMAND.read().unwrap(), self_pid);
@@ -154,111 +146,89 @@ fn main() -> Result<()> {
     println!("pid: {:?}", pid);
     ptrace::attach(pid).unwrap();
     ptrace::set_tracesysgood(pid);
+    // ptrace::set_emulate_option(pid);
 
     let root_pid = getpid();
     update_mapping(Mapping::UID, pid, "0 0 1\n");
     update_mapping(Mapping::GID, pid, "0 0 1\n");
-    let mut is_enter_stop: bool = false;
-    let mut prev_orig_rax = 0;
+
+    let mut prev_orig_rax_by_pid: HashMap<Pid, u64> = HashMap::new();
     let mut emulate_flag = false;
-    // let command_start_flag = Arc::clone(&command_start_flag);
     let command_start_check_pipe = Arc::clone(&command_start_check_pipe);
     let mut prepare_flag = false;
     loop {
         let status: WaitStatus = ptrace::wait_pid(pid).unwrap();
+        // let status: WaitStatus = ptrace::wait_all().unwrap();
+        let pid = status.pid().unwrap();
+        // println!("pid: {:?}", pid);
+        // let pid_num: i64 = ptrace::get_event(pid)?;
+        // println!("pid: {:?}, get_event: {:?}", pid, pid_num);
+
+        let prev_orig_rax = match prev_orig_rax_by_pid.get(&pid) {
+            Some(rax) => rax.to_owned(),
+            None => 0,
+        };
+
         // println!("status: {:?}", status);
         let mut regs: user_regs_struct = ptrace::getregs(pid).unwrap();
         // println!("prev_orig_rax: {:?}, orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", prev_orig_rax, regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
-        match status {
-            WaitStatus::Stopped(pid, sig) => {
-                match sig {
-                    signal::SIGTRAP => {
-                        // if regs.orig_rax == libc::SYS_write as u64 && (regs.rdi == 1 || regs.rdi == 2 ) {
-                        if regs.orig_rax == libc::SYS_write as u64 && regs.rdi == 1 {
-                            is_enter_stop = if regs.orig_rax != prev_orig_rax {
-                                true
-                            } else if regs.rax as i64 == -38 {
-                                true
-                            } else {
-                                false
-                            };
 
-                            let mut bytes_list = vec![];
-                            if is_enter_stop {
-                                for i in 0..(regs.rdx / (std::mem::size_of::<u64>() as u64)) {
-                                    let data = ptrace::read_memory(pid, regs.rsi + (i * 8))?;
-                                    for j in 0..8 {
-                                        bytes_list.push((data >> j * 8) as u8);
-                                    }
-                                    print!("{:?}", std::str::from_utf8(&bytes_list).unwrap());
-                                    bytes_list = vec![];
-                                }
-                                // {
-                                    // println!("*COMMAND_START_FLAG.read().unwrap(): {:?}", *COMMAND_START_FLAG.read().unwrap());
-                                    // println!("*command_start_flag.read().unwrap(): {:?}, {:p}", *command_start_flag.read().unwrap(), &*command_start_flag.read().unwrap());
-                                    // if *command_start_flag.read().unwrap() == true {
-                                    //     regs.rax = regs.rdx;
-                                    //     ptrace::setregs(pid, regs);
-                                    //     emulate_flag = true;
-                                    // }
-                                // }
-                                {
-                                    if !prepare_flag {
-                                        let read__guard = command_start_check_pipe.read().unwrap();
-                                        println!("bbbbbbbbbbb: {:?}", *read__guard);
-                                        let mut pipe = OpenOptions::new()
-                                            .read(true)
-                                            .open((*read__guard).as_path());
-                                        println!("pipe: {:?}", pipe);
-                                        let mut contents = String::new();
-                                        println!("ccccccccccccc");
-                                        if pipe.is_ok() {
-                                            println!("ddddddddd");
-                                            pipe.unwrap().read_to_string(&mut contents);
-                                        }
-                                        // spawn_sh("cat /tmp/fifo.pipe", root_pid);
-                                        println!("command_start_check_pipe: {:?}", contents);
-                                        if contents == "Prepare done!".to_owned() {
-                                            prepare_flag = true
-                                            // regs.rax = regs.rdx;
-                                            // ptrace::setregs(pid, regs);
-                                            // emulate_flag = true;
-                                        }
-                                    } else {
-                                        regs.rax = regs.rdx;
-                                        ptrace::setregs(pid, regs);
-                                        emulate_flag = true;
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    signal::SIGSEGV => {
-                        ptrace::detach(pid);
-                        println!("Pid: {:?} is Segv.", pid);
-                        println!("emulate_flag: {:?}, prev_orig_rax: {:?}, orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", emulate_flag, prev_orig_rax, regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
-                        if regs.orig_rax as i64 != -1 {
-                            break;
-                        }
-                    }
-                    _ => {
-                        println!("nothing.(not trap)");
+        if !prepare_flag {
+            {
+                let read_guard = command_start_check_pipe.read().unwrap();
+                let mut contents = fs::read_to_string(read_guard.as_path()).unwrap();
+                // println!("command_start_check_pipe: {:?}", contents);
+                if contents == "Prepare done!".to_owned() {
+                    println!("Prepare done!!!!!!!!!!!!");
+                    prepare_flag = true;
+                    emulate_flag = match handle_syscall(pid, status, regs, prev_orig_rax, root_pid) {
+                        Ok(flag) => {
+                            if flag.is_none() { break; }
+                            flag.unwrap()
+                        },
+                        Err(e) => {
+                            println!("Error!!!: {:?}", e);
+                            break
+                        },
                     }
                 }
-            },
-            _ => {
-                println!("nothing.(not stopped)");
-            },
+            }
+        } else {
+            emulate_flag = match handle_syscall(pid, status, regs, prev_orig_rax, root_pid) {
+                Ok(flag) => {
+                    if flag.is_none() { break; }
+                    flag.unwrap()
+                },
+                Err(e) => {
+                    println!("Error!!!: {:?}", e);
+                    break
+                },
+            }
         }
-        is_enter_stop = false;
-        prev_orig_rax = regs.orig_rax;
+
+        // prev_orig_rax = regs.orig_rax;
+        prev_orig_rax_by_pid.insert(pid, regs.orig_rax);
         // println!("");
         if emulate_flag {
-            println!("Emulate!!!!!!!^^");
-            ptrace::sysemu(pid);
+            if regs.eflags & 1 << 8 != 0 {
+                ptrace::sysemu_single(pid);
+            } else {
+                ptrace::sysemu(pid);
+            }
+            println!("Emulate!!!!!");
             // ptrace::syscall(pid);
+            println!("Exit!!!!! prev_orig_rax: {:?}, orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", prev_orig_rax, regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
         } else {
+            if regs.eflags & 1 << 8 != 0 {
+                ptrace::syscall_step(pid);
+            } else {
+                ptrace::syscall(pid);
+            }
+            ptrace::wait_pid(pid).unwrap();
+            let mut regs: user_regs_struct = ptrace::getregs(pid).unwrap();
+            println!("syscall Exit!!!!! prev_orig_rax: {:?}, orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", prev_orig_rax, regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
             ptrace::syscall(pid);
+
         }
         emulate_flag = false;
     }
@@ -385,4 +355,67 @@ fn make_fifo(file_path: &str, mode: Mode) -> Result<PathBuf> {
     let fifo_path = Path::new("/tmp").join(file_path);
     nix::unistd::mkfifo(&fifo_path, mode)?;
     Ok(fifo_path)
+}
+
+fn make_file(path: &str) -> Result<PathBuf> {
+    let file_path = Path::new("/tmp").join(path);
+    fs::write(&file_path, "")?;
+    Ok(file_path)
+}
+
+fn handle_syscall(pid: Pid, status: WaitStatus, regs: user_regs_struct, prev_orig_rax: u64, root_pid: Pid) -> Result<Option<bool>> {
+    match status {
+        WaitStatus::PtraceSyscall(pid) => {
+            if regs.orig_rax == libc::SYS_write as u64 && (regs.rdi == 1 || regs.rdi == 2 ) {
+                let mut bytes_list = vec![];
+                println!("Enter!! orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
+                for i in 0..(regs.rdx / (std::mem::size_of::<u64>() as u64)) {
+                    let data = ptrace::read_memory(pid, regs.rsi + (i * 8))?;
+                    for j in 0..8 {
+                        bytes_list.push((data >> j * 8) as u8);
+                    }
+                    print!("{:?}", std::str::from_utf8(&bytes_list).unwrap());
+                    bytes_list = vec![];
+                }
+                let mut new_regs = regs.clone();
+                new_regs.rax = regs.rdx;
+                ptrace::setregs(pid, new_regs);
+                return Ok(Some(true))
+            }
+
+            // なぜかpipeが失敗するので、無理やり成功させた異にする
+            if regs.orig_rax == libc::SYS_pipe as u64 {
+                let mut new_regs = regs.clone();
+                new_regs.rax = 0;
+                ptrace::setregs(pid, new_regs);
+                return Ok(Some(false))
+            }
+        },
+        WaitStatus::Stopped(pid, sig) => {
+            match sig {
+                signal::SIGCHLD => {
+                    let siginfo: libc::siginfo_t = ptrace::get_siginfo(pid).unwrap();
+                    println!("siginfo: {:?}, si_value: {:?}, si_addr: {:?}", siginfo, unsafe { siginfo.si_value() }, unsafe { siginfo.si_addr() });
+                    ptrace::syscall_step(pid);
+                },
+                signal::SIGSEGV => {
+                    ptrace::detach(pid);
+                    println!("Pid: {:?} is Segv.", pid);
+                    println!("orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
+                    if regs.orig_rax as i64 != -1 {
+                        return Ok(None)
+                    }
+                }
+                _ => {
+                    println!("nothing.(not PtraceSyscall)");
+                    return Ok(Some(false))
+                }
+            }
+        },
+        _ => {
+            println!("nothing.(not stopped)");
+            return Ok(Some(false))
+        },
+    }
+    Ok(Some(false))
 }
