@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, Error};
 use std::io::{Write, Stderr, BufReader, BufRead, Read, BufWriter};
 use std::process::{Command, Stdio};
 use std::fs::{self, copy, read_dir, FileType, set_permissions, remove_dir, OpenOptions, File};
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::ffi::OsStr;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Arc};
 use std::collections::HashMap;
+use std::io::stdout;
 
 mod ptrace;
 
@@ -157,8 +158,8 @@ fn main() -> Result<()> {
     let command_start_check_pipe = Arc::clone(&command_start_check_pipe);
     let mut prepare_flag = false;
     loop {
-        let status: WaitStatus = ptrace::wait_pid(pid).unwrap();
-        // let status: WaitStatus = ptrace::wait_all().unwrap();
+        // let status: WaitStatus = ptrace::wait_pid(pid).unwrap();
+        let status: WaitStatus = ptrace::wait_all().unwrap();
         let pid = status.pid().unwrap();
         // println!("pid: {:?}", pid);
         // let pid_num: i64 = ptrace::get_event(pid)?;
@@ -211,6 +212,7 @@ fn main() -> Result<()> {
         // println!("");
         if emulate_flag {
             if regs.eflags & 1 << 8 != 0 {
+                println!("sysemu_single!!!!!");
                 ptrace::sysemu_single(pid);
             } else {
                 ptrace::sysemu(pid);
@@ -226,9 +228,8 @@ fn main() -> Result<()> {
             }
             ptrace::wait_pid(pid).unwrap();
             let mut regs: user_regs_struct = ptrace::getregs(pid).unwrap();
-            println!("syscall Exit!!!!! prev_orig_rax: {:?}, orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", prev_orig_rax, regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
+            // println!("syscall Exit!!!!! prev_orig_rax: {:?}, orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", prev_orig_rax, regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
             ptrace::syscall(pid);
-
         }
         emulate_flag = false;
     }
@@ -260,7 +261,7 @@ pub fn spawn_sh(command: &str, pid: Pid) {
         .unwrap()
         .wait_with_output()
         .unwrap();
-    println!("Status: {:?}, command: {:?}", output.status, command);
+    println!("pid: {:?}, Status: {:?}, command: {:?}", getpid(), output.status, command);
     let stdout = output.stdout;
     let lines = String::from_utf8(stdout).unwrap();
     let split_by_line: Vec<&str> = lines.split('\n').collect();
@@ -369,12 +370,20 @@ fn handle_syscall(pid: Pid, status: WaitStatus, regs: user_regs_struct, prev_ori
             if regs.orig_rax == libc::SYS_write as u64 && (regs.rdi == 1 || regs.rdi == 2 ) {
                 let mut bytes_list = vec![];
                 println!("Enter!! orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
-                for i in 0..(regs.rdx / (std::mem::size_of::<u64>() as u64)) {
+                let size_by_byte = if (regs.rdx % (std::mem::size_of::<u64>() as u64)) == 0 {
+                    (regs.rdx / (std::mem::size_of::<u64>() as u64))
+                } else {
+                    (regs.rdx / (std::mem::size_of::<u64>() as u64)) + 1
+                };
+                println!("size: {}", size_by_byte);
+                for i in 0..size_by_byte {
                     let data = ptrace::read_memory(pid, regs.rsi + (i * 8))?;
                     for j in 0..8 {
                         bytes_list.push((data >> j * 8) as u8);
                     }
-                    print!("{:?}", std::str::from_utf8(&bytes_list).unwrap());
+                    // print!("{:?}", std::str::from_utf8(&bytes_list).unwrap());
+                    stdout().write_all(&bytes_list.as_slice()).map_err(|e| Error::new(e))?;
+                    stdout().flush().map_err(|e| Error::new(e))?;
                     bytes_list = vec![];
                 }
                 let mut new_regs = regs.clone();
