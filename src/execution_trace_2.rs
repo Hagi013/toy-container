@@ -366,6 +366,27 @@ fn make_file(path: &str) -> Result<PathBuf> {
 
 fn handle_syscall(pid: Pid, status: WaitStatus, regs: user_regs_struct, prev_orig_rax: u64, root_pid: Pid) -> Result<Option<bool>> {
     match status {
+        WaitStatus::Stopped(pid, sig) => {
+            match sig {
+                signal::SIGCHLD => {
+                    let siginfo: libc::siginfo_t = ptrace::get_siginfo(pid).unwrap();
+                    println!("siginfo: {:?}, si_value: {:?}, si_addr: {:?}", siginfo, unsafe { siginfo.si_value() }, unsafe { siginfo.si_addr() });
+                    ptrace::syscall_step(pid);
+                },
+                signal::SIGSEGV => {
+                    ptrace::detach(pid);
+                    println!("Pid: {:?} is Segv.", pid);
+                    println!("orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
+                    if regs.orig_rax as i64 != -1 {
+                        return Ok(None)
+                    }
+                }
+                _ => {
+                    println!("nothing.(not PtraceSyscall)");
+                    return Ok(Some(false))
+                }
+            }
+        },
         WaitStatus::PtraceSyscall(pid) => {
             if regs.orig_rax == libc::SYS_write as u64 && (regs.rdi == 1 || regs.rdi == 2 ) {
                 let mut bytes_list = vec![];
@@ -398,27 +419,6 @@ fn handle_syscall(pid: Pid, status: WaitStatus, regs: user_regs_struct, prev_ori
                 new_regs.rax = 0;
                 ptrace::setregs(pid, new_regs);
                 return Ok(Some(false))
-            }
-        },
-        WaitStatus::Stopped(pid, sig) => {
-            match sig {
-                signal::SIGCHLD => {
-                    let siginfo: libc::siginfo_t = ptrace::get_siginfo(pid).unwrap();
-                    println!("siginfo: {:?}, si_value: {:?}, si_addr: {:?}", siginfo, unsafe { siginfo.si_value() }, unsafe { siginfo.si_addr() });
-                    ptrace::syscall_step(pid);
-                },
-                signal::SIGSEGV => {
-                    ptrace::detach(pid);
-                    println!("Pid: {:?} is Segv.", pid);
-                    println!("orig_rax: {:?}, rsi: {:?}, rdx: {:?}, rdi: {:?}, rax: {:?}", regs.orig_rax, regs.rsi, regs.rdx, regs.rdi, regs.rax);
-                    if regs.orig_rax as i64 != -1 {
-                        return Ok(None)
-                    }
-                }
-                _ => {
-                    println!("nothing.(not PtraceSyscall)");
-                    return Ok(Some(false))
-                }
             }
         },
         _ => {
