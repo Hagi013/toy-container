@@ -400,6 +400,7 @@ fn handle_syscall(pid: Pid, status: WaitStatus, regs: user_regs_struct, prev_ori
                 for i in 0..size_by_byte {
                     let data = ptrace::read_memory(pid, regs.rsi + (i * 8))?;
                     for j in 0..8 {
+                        if i == size_by_byte - 1 && j as i64 > (regs.rdx as i64 % (std::mem::size_of::<i64>() as i64) - 1) { break; }
                         bytes_list.push((data >> j * 8) as u8);
                     }
                     // print!("{:?}", std::str::from_utf8(&bytes_list).unwrap());
