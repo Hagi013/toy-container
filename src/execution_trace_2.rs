@@ -396,7 +396,7 @@ fn handle_syscall(pid: Pid, status: WaitStatus, regs: user_regs_struct, prev_ori
                 } else {
                     (regs.rdx / (std::mem::size_of::<u64>() as u64)) + 1
                 };
-                println!("size: {}", size_by_byte);
+                // println!("size: {}", size_by_byte);
                 for i in 0..size_by_byte {
                     let data = ptrace::read_memory(pid, regs.rsi + (i * 8))?;
                     for j in 0..8 {
