@@ -189,9 +189,9 @@ fn main() -> Result<()> {
         prev_orig_rax = regs.orig_rax;
         if emu_flag {
             println!("emulate.{:?}", emu_flag);
-            ptrace::sysemu(pid);
+            // ptrace::sysemu(pid);
             // ptrace::sysemu_single(pid);
-            // ptrace::syscall(pid);
+            ptrace::syscall(pid);
         } else {
             ptrace::syscall(pid);
         }

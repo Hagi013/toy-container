@@ -10,8 +10,18 @@ pub fn attach(pid: Pid) -> Result<()> {
     Ok(())
 }
 
+pub fn traceme() -> Result<()> {
+    ptrace::traceme()?;
+    Ok(())
+}
+
 pub fn detach(pid: Pid) -> Result<()> {
     ptrace::detach(pid, None)?;
+    Ok(())
+}
+
+pub fn cont(pid: Pid) -> Result<()> {
+    ptrace::cont(pid, None)?;
     Ok(())
 }
 
@@ -19,7 +29,8 @@ pub fn set_tracesysgood(pid: Pid) -> Result<()>  {
     let status = wait_pid(pid)?;
     match status {
         WaitStatus::Stopped(pid, signal::SIGSTOP) => {
-            ptrace::setoptions(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD).unwrap();
+            // ptrace::setoptions(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD).unwrap();
+            set_option_simple(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD).unwrap();
         },
         _ => {
             panic!("Not Stopped Process...{:?}", pid);
@@ -33,13 +44,24 @@ pub fn set_emulate_option(pid: Pid) -> Result<()> {
     let status = wait_pid(pid)?;
     match status {
         WaitStatus::Stopped(pid, signal::SIGSTOP) => {
-            ptrace::setoptions(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD | ptrace::Options::PTRACE_O_TRACEFORK | ptrace::Options::PTRACE_O_TRACEEXEC | ptrace::Options::PTRACE_O_TRACECLONE).unwrap();
+            // ptrace::setoptions(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD | ptrace::Options::PTRACE_O_TRACEFORK | ptrace::Options::PTRACE_O_TRACEEXEC | ptrace::Options::PTRACE_O_TRACECLONE).unwrap();
+            set_option_simple(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD | ptrace::Options::PTRACE_O_TRACEFORK | ptrace::Options::PTRACE_O_TRACEEXEC | ptrace::Options::PTRACE_O_TRACECLONE).unwrap();
         },
         _ => {
-            panic!("Not Stopped Process...{:?}", pid);
+            panic!("Not Stopped Process...{:?}, Status: {:?}", pid, status);
         }
     }
     syscall(pid);
+    Ok(())
+}
+
+pub fn set_emulate_option_simple(pid: Pid) -> Result<()> {
+    set_option_simple(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD | ptrace::Options::PTRACE_O_TRACEFORK | ptrace::Options::PTRACE_O_TRACEEXEC | ptrace::Options::PTRACE_O_TRACECLONE).unwrap();
+    Ok(())
+}
+
+pub fn set_option_simple(pid: Pid, options: ptrace::Options) -> Result<()> {
+    ptrace::setoptions(pid, options).unwrap();
     Ok(())
 }
 
