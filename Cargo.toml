@@ -33,6 +33,18 @@ path = "src/execution_trace_2.rs"
 name = "multi-trace-1"
 path = "src/execution_multi_trace_1.rs"
 
+[[bin]]
+name = "tracer-1"
+path = "src/tracer_1.rs"
+
+[[bin]]
+name = "mirror"
+path = "src/mirror.rs"
+
+[[bin]]
+name = "print-emulator"
+path = "src/print_emulator.rs"
+
 [dependencies]
 anyhow = "1.0.31"
 nix = "0.17.0"

@@ -45,7 +45,7 @@ pub fn set_emulate_option(pid: Pid) -> Result<()> {
     match status {
         WaitStatus::Stopped(pid, signal::SIGSTOP) => {
             // ptrace::setoptions(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD | ptrace::Options::PTRACE_O_TRACEFORK | ptrace::Options::PTRACE_O_TRACEEXEC | ptrace::Options::PTRACE_O_TRACECLONE).unwrap();
-            set_option_simple(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD | ptrace::Options::PTRACE_O_TRACEFORK | ptrace::Options::PTRACE_O_TRACEEXEC | ptrace::Options::PTRACE_O_TRACECLONE).unwrap();
+            set_option_simple(pid, ptrace::Options::PTRACE_O_TRACESYSGOOD | ptrace::Options::PTRACE_O_TRACEFORK | ptrace::Options::PTRACE_O_TRACEEXEC | ptrace::Options::PTRACE_O_TRACECLONE | ptrace::Options::PTRACE_O_TRACEEXIT).unwrap();
         },
         _ => {
             panic!("Not Stopped Process...{:?}, Status: {:?}", pid, status);
